@@ -44,6 +44,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm test
 
   computer-use:
@@ -60,6 +62,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm run build
       - run: node test/test-computer-use.js
       - run: node test/test-computer-use-helper-process.js
