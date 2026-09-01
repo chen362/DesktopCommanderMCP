@@ -7,6 +7,9 @@ if (process.platform !== 'darwin') {
 
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport, getDefaultEnvironment } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+const { fileURLToPath } = await import('node:url');
+
+const serverEntry = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 
 const expected = [
   'computer_check_permissions',
@@ -34,7 +37,7 @@ const expected = [
 const client = new Client({ name: 'computer-use-registration-test', version: '1.0.0' }, { capabilities: {} });
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['../dist/index.js', '--no-onboarding'],
+  args: [serverEntry, '--no-onboarding'],
   env: {
     ...getDefaultEnvironment(),
     COMPUTER_USE_ENABLED: 'true',
