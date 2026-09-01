@@ -44,7 +44,7 @@ export class MacOSComputerUseBackend implements ComputerUseBackend {
   }
 
   moveMouse(point: Point): Promise<void> {
-    return this.helper.request('moveMouse', point);
+    return this.helper.request('moveMouse', { x: point.x, y: point.y });
   }
 
   click(point: Point, button: MouseButton, clickCount: 1 | 2): Promise<void> {
