@@ -78,6 +78,13 @@ import {
 } from './ui/contracts.js';
 import { listUiResources, readUiResource } from './ui/resources.js';
 import { shouldShowMcpUiPreviews } from './utils/mcp-ui-ab-test.js';
+import {
+    getComputerUseToolDefinitions,
+    handleComputerUseTool,
+    isComputerUseToolName,
+    sanitizeComputerUseArguments,
+    sanitizeComputerUseResultForLogs,
+} from './computer-use/index.js';
 
 // Store startup messages to send after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -315,6 +322,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - fileReadLineLimit (max lines for read_file, default 1000)
                         - fileWriteLineLimit (max lines per write_file call, default 50)
                         - telemetryEnabled (boolean for telemetry opt-in/out)
+                        - computerUse (opt-in macOS GUI-control policy object; disabled by default)
                         - currentClient (information about the currently connected MCP client)
                         - clientHistory (history of all clients that have connected)
                         - version (version of the DesktopCommander)
@@ -342,6 +350,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - fileReadLineLimit (number, max lines for read_file)
                         - fileWriteLineLimit (number, max lines per write_file call)
                         - telemetryEnabled (boolean)
+                        - computerUse (object with enabled, allowScreenshots, allowMouse, allowKeyboard,
+                          allowAccessibility, allowedDisplays, allowedApps, and safety policy fields)
                         
                         IMPORTANT: Setting allowedDirectories to an empty array ([]) allows full access 
                         to the entire file system, regardless of the operating system.
@@ -1228,7 +1238,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     title: "Get Prompts",
                     readOnlyHint: true,
                 },
-            }
+            },
+            ...await getComputerUseToolDefinitions(),
         ];
 
         // Filter tools based on current client
@@ -1271,6 +1282,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     let telemetryData: any = { tool_name: name };
     let result: ServerResult;
     let isError = false;
+    const auditArgs = sanitizeComputerUseArguments(name, args);
 
     try {
         // telemetryData declared above; extract metadata from _meta field if present
@@ -1317,9 +1329,6 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 telemetryData.prompt_id = promptArgs.promptId;
             }
         }
-
-        // Track tool call
-        trackToolCall(name, args);
 
         // Using a more structured approach with dedicated handlers
         // (result is declared above so the finally block can read execution status)
@@ -1529,11 +1538,15 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 break;
 
             default:
-                capture('server_unknown_tool', { name });
-                result = {
-                    content: [{ type: "text", text: `Error: Unknown tool: ${name}` }],
-                    isError: true,
-                };
+                if (isComputerUseToolName(name)) {
+                    result = await handleComputerUseTool(name, args);
+                } else {
+                    capture('server_unknown_tool', { name });
+                    result = {
+                        content: [{ type: "text", text: `Error: Unknown tool: ${name}` }],
+                        isError: true,
+                    };
+                }
         }
 
         // Add tool call to history (exclude only get_recent_tool_calls to prevent recursion)
@@ -1545,7 +1558,12 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         ];
 
         if (!EXCLUDED_TOOLS.includes(name)) {
-            toolHistory.addCall(name, args, result, duration);
+            toolHistory.addCall(
+                name,
+                auditArgs,
+                sanitizeComputerUseResultForLogs(name, result),
+                duration,
+            );
         }
 
         // Track success or failure based on result
@@ -1662,10 +1680,27 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
             // Never let the advisory warning break an otherwise-successful call.
         }
 
+        const auditError = result.isError
+            ? result.content.find((item) => item.type === 'text' && item.text)?.text
+            : undefined;
+        const auditWrite = trackToolCall(name, auditArgs, {
+            success: !result.isError,
+            durationMs: Date.now() - startTime,
+            error: auditError,
+        });
+        if (isComputerUseToolName(name)) await auditWrite;
+
         return result;
     } catch (error) {
         isError = true;
         const errorMessage = error instanceof Error ? error.message : String(error);
+
+        const auditWrite = trackToolCall(name, auditArgs, {
+            success: false,
+            durationMs: Date.now() - startTime,
+            error: errorMessage,
+        });
+        if (isComputerUseToolName(name)) await auditWrite;
 
         // Track the failure
         await usageTracker.trackFailure(name);

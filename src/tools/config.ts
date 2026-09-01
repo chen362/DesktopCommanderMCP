@@ -10,8 +10,9 @@ import {
   CONFIG_FIELD_KEYS,
   isConfigFieldKey,
 } from '../config-field-definitions.js';
+import { ComputerUseConfigValueSchema } from '../computer-use/schemas.js';
 
-const ALLOWED_CONFIG_KEYS = new Set(CONFIG_FIELD_KEYS);
+const ALLOWED_CONFIG_KEYS = new Set<string>([...CONFIG_FIELD_KEYS, 'computerUse']);
 
 async function pathExists(pathValue: string): Promise<boolean> {
   try {
@@ -170,7 +171,7 @@ export async function setConfigValue(args: unknown) {
       };
     }
 
-    if (!isConfigFieldKey(parsed.data.key)) {
+    if (!isConfigFieldKey(parsed.data.key) && parsed.data.key !== 'computerUse') {
       return {
         content: [{
           type: "text",
@@ -181,7 +182,9 @@ export async function setConfigValue(args: unknown) {
     }
 
     try {
-      const fieldDefinition = CONFIG_FIELD_DEFINITIONS[parsed.data.key];
+      const fieldDefinition = isConfigFieldKey(parsed.data.key)
+        ? CONFIG_FIELD_DEFINITIONS[parsed.data.key]
+        : null;
       // Parse string values that should be arrays or objects
       let valueToStore = parsed.data.value;
       
@@ -197,7 +200,7 @@ export async function setConfigValue(args: unknown) {
       }
 
       // Special handling for known array configuration keys
-      if (fieldDefinition.valueType === 'array' && !Array.isArray(valueToStore)) {
+      if (fieldDefinition?.valueType === 'array' && !Array.isArray(valueToStore)) {
         if (typeof valueToStore === 'string') {
           const originalString = valueToStore;
           try {
@@ -223,7 +226,7 @@ export async function setConfigValue(args: unknown) {
       }
 
       // Harden boolean fields against stringly-typed inputs like "false".
-      if (fieldDefinition.valueType === 'boolean') {
+      if (fieldDefinition?.valueType === 'boolean') {
         if (typeof valueToStore === 'string') {
           const normalized = valueToStore.trim().toLowerCase();
           if (normalized === 'true') {
@@ -242,6 +245,21 @@ export async function setConfigValue(args: unknown) {
             isError: true
           };
         }
+      }
+
+      if (parsed.data.key === 'computerUse') {
+        const validated = ComputerUseConfigValueSchema.safeParse(valueToStore);
+        if (!validated.success) {
+          return {
+            content: [{ type: 'text', text: `Invalid computerUse configuration: ${validated.error}` }],
+            isError: true,
+          };
+        }
+        const current = await configManager.getValue('computerUse');
+        valueToStore = {
+          ...(current && typeof current === 'object' && !Array.isArray(current) ? current : {}),
+          ...validated.data,
+        };
       }
 
       await configManager.setValue(parsed.data.key, valueToStore);

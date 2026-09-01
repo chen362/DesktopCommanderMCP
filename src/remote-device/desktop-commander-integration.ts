@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'url';
 import { captureRemote } from '../utils/capture.js';
+import { sanitizeComputerUseArguments } from '../computer-use/logging.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -132,7 +133,12 @@ export class DesktopCommanderIntegration {
 
         // Proxy other tools to MCP server
         try {
-            console.debug('[DEBUG] Calling MCP tool:', toolName, 'args:', JSON.stringify(args).substring(0, 100));
+            console.debug(
+                '[DEBUG] Calling MCP tool:',
+                toolName,
+                'args:',
+                JSON.stringify(sanitizeComputerUseArguments(toolName, args)).substring(0, 500),
+            );
             const result = await this.mcpClient.callTool({
                 name: toolName,
                 arguments: args,

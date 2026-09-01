@@ -1,0 +1,70 @@
+name: Computer Use CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/computer-use/**'
+      - 'src/server.ts'
+      - 'src/config-manager.ts'
+      - 'src/remote-device/**'
+      - 'src/tools/**'
+      - 'src/utils/trackTools.ts'
+      - 'test/test-computer-use*.js'
+      - 'test/integration/computer-use-macos.js'
+      - 'scripts/build-computer-use-helper.cjs'
+      - 'package.json'
+      - '.github/workflows/computer-use-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/computer-use/**'
+      - 'src/server.ts'
+      - 'src/config-manager.ts'
+      - 'src/remote-device/**'
+      - 'src/tools/**'
+      - 'src/utils/trackTools.ts'
+      - 'test/test-computer-use*.js'
+      - 'test/integration/computer-use-macos.js'
+      - 'scripts/build-computer-use-helper.cjs'
+      - 'package.json'
+      - '.github/workflows/computer-use-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Existing regression suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  computer-use:
+    name: Computer Use (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node test/test-computer-use.js
+      - run: node test/test-computer-use-helper-process.js
+      - run: node test/test-computer-use-remote.js
+      - if: runner.os == 'macOS'
+        run: npm run computer-use:build-helper
+      - if: runner.os == 'macOS'
+        run: node test/test-computer-use-registration.js

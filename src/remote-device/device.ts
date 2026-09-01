@@ -8,6 +8,10 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import { captureRemote } from '../utils/capture.js';
+import {
+    sanitizeComputerUseArguments,
+    summarizeComputerUseResultForConsole,
+} from '../computer-use/logging.js';
 
 export interface MCPDeviceOptions {
     persistSession?: boolean;
@@ -305,7 +309,7 @@ export class MCPDevice {
             return;
         }
 
-        console.log(`🔧 Received tool call ${call_id}: ${tool_name} ${JSON.stringify(tool_args)} metadata: ${JSON.stringify(metadata)}`);
+        console.log(`🔧 Received tool call ${call_id}: ${tool_name} ${JSON.stringify(sanitizeComputerUseArguments(tool_name, tool_args))} metadata: ${JSON.stringify(metadata)}`);
 
         // LOCAL claim first — this is the authoritative guard against executing
         // a call twice. During the transition both transports deliver every call
@@ -359,7 +363,7 @@ export class MCPDevice {
                 result = await this.desktop.callClientTool(tool_name, tool_args, metadata);
             }
 
-            console.log(`✅ Tool call ${tool_name} completed:\r\n ${JSON.stringify(result)}`);
+            console.log(`✅ Tool call ${tool_name} completed:\r\n ${JSON.stringify(summarizeComputerUseResultForConsole(tool_name, result))}`);
 
             // Update database with result, THEN ring the doorbell — the server
             // fetches the row by id on the doorbell, so the write must land first.
