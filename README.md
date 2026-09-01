@@ -639,8 +639,8 @@ All pointer/window coordinates are **logical points in the
 - A Retina screenshot uses physical pixels. Convert a screenshot pixel to a click point with:
 
   ```text
-  logicalX = display.x + pixelX / scaleFactor
-  logicalY = display.y + pixelY / scaleFactor
+  logical_x = display_x + pixel_x / scale_factor
+  logical_y = display_y + pixel_y / scale_factor
   ```
 
 Coordinates are checked against the live display layout immediately before native events.
@@ -654,7 +654,7 @@ A disconnected display or out-of-bounds point fails without posting the event.
   actions check the active app; clicks and drags check the topmost window at the target.
 - Potentially destructive shortcuts such as `command+q`, `command+w`, and
   `control+command+q` require explicit user confirmation and `confirmed=true` by default.
-- Obvious destructive terminal text is blocked in Terminal/iTerm/Warp unless confirmed.
+- Obvious destructive terminal text is blocked in configured terminal applications unless confirmed.
 - `computer_type` content is replaced with `[REDACTED]` before shared audit/history logging.
   Logs retain the tool name, timestamp, argument metadata, success/failure, duration, and
   error without recording the typed string.

@@ -117,7 +117,7 @@ export class ComputerUseService {
           pixelWidth: screenshot.pixelWidth,
           pixelHeight: screenshot.pixelHeight,
           display: screenshot.display,
-          coordinateConversion: 'logicalX = display.x + pixelX / scaleFactor; logicalY = display.y + pixelY / scaleFactor',
+          coordinateConversion: 'logical x = display x + pixel x / scale factor; logical y = display y + pixel y / scale factor',
         };
         return {
           content: [
