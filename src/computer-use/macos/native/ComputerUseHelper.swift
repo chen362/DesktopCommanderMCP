@@ -341,8 +341,9 @@ final class ComputerUseHelper {
     private func windowDictionary(_ info: [String: Any], displays: [CGDirectDisplayID], frontmostPID: pid_t?) -> [String: Any]? {
         let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
         guard layer == 0 else { return nil }
-        guard let boundsRaw = info[kCGWindowBounds as String] as? CFDictionary,
-              let bounds = CGRect(dictionaryRepresentation: boundsRaw),
+        guard let boundsValue = info[kCGWindowBounds as String] else { return nil }
+        let boundsRaw = boundsValue as! CFDictionary
+        guard let bounds = CGRect(dictionaryRepresentation: boundsRaw),
               bounds.width > 0, bounds.height > 0 else { return nil }
         let processID = pid_t((info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0)
         guard processID > 0 else { return nil }

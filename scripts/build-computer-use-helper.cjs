@@ -21,7 +21,7 @@ if (process.platform !== 'darwin') {
 
 const output = path.join(destinationDirectory, 'computer-use-helper');
 const result = spawnSync('/usr/bin/xcrun', [
-  'swiftc', destination, '-O', '-o', output,
+  'swiftc', destination, '-parse-as-library', '-O', '-o', output,
   '-framework', 'AppKit',
   '-framework', 'ApplicationServices',
   '-framework', 'CoreGraphics',

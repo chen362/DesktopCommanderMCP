@@ -124,7 +124,7 @@ async function resolveHelperBinary(config: ComputerUseConfig): Promise<string> {
   const temporaryPath = `${binaryPath}.${process.pid}.tmp`;
   await rm(temporaryPath, { force: true });
   await runCompiler([
-    'swiftc', sourcePath, '-O', '-o', temporaryPath,
+    'swiftc', sourcePath, '-parse-as-library', '-O', '-o', temporaryPath,
     '-framework', 'AppKit',
     '-framework', 'ApplicationServices',
     '-framework', 'CoreGraphics',
