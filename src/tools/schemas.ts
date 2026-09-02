@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { computerUseToolArgSchemas } from '../computer-use/schemas.js';
 
 // Config tools schemas
 export const GetConfigArgsSchema = z.object({
@@ -14,6 +15,7 @@ export const SetConfigValueArgsSchema = z.object({
     z.number(),
     z.boolean(),
     z.array(z.string()),
+    z.record(z.any()),
     z.null(),
   ]),
   // 'ui' marks widget-fired calls; excluded from tool-call telemetry.
@@ -274,4 +276,5 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   give_feedback_to_desktop_commander: GiveFeedbackArgsSchema,
   get_prompts: GetPromptsArgsSchema,
   track_ui_event: TrackUiEventArgsSchema,
+  ...computerUseToolArgSchemas,
 };

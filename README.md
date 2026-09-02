@@ -489,6 +489,252 @@ How it works:
 
 </details>
 
+## Computer Use (macOS)
+
+Desktop Commander can expose an opt-in macOS Computer Use layer to local MCP clients and
+to ChatGPT/Claude web through the existing Remote Device bridge. It adds screenshots,
+pointer and keyboard control, window metadata, display geometry, state snapshots, and a
+bounded Accessibility tree while keeping the existing terminal, filesystem, search,
+process, document, UI, authentication, and Remote MCP behavior unchanged.
+
+Computer Use is **disabled by default**. Existing installations do not gain GUI control
+unless the user explicitly enables it.
+
+### Requirements and setup
+
+- macOS on Apple Silicon is the primary target. Modern macOS is recommended.
+- Install the Xcode Command Line Tools once so Desktop Commander can compile its native
+  helper for the current Mac:
+
+  ```bash
+  xcode-select --install
+  ```
+
+- Build/install Desktop Commander normally. The build copies the Swift helper source into
+  `dist`; the first Computer Use call compiles it into a stable per-user cache and starts it
+  as a persistent process. Later calls reuse the same process. A local macOS checkout can
+  precompile it with `npm run computer-use:build-helper`.
+- Enable Computer Use before starting the MCP server or Remote Device:
+
+  ```bash
+  COMPUTER_USE_ENABLED=true npx -y @wonderwhy-er/desktop-commander@latest remote
+  ```
+
+  For a local checkout:
+
+  ```bash
+  npm run build
+  COMPUTER_USE_ENABLED=true node dist/index.js remote
+  ```
+
+The same switch is available as `computerUse.enabled` in Desktop Commander configuration.
+For example, `set_config_value` accepts this policy object; restart the MCP/Remote Device
+process after changing tool visibility:
+
+```json
+{
+  "key": "computerUse",
+  "value": {
+    "enabled": true,
+    "allowScreenshots": true,
+    "allowMouse": true,
+    "allowKeyboard": true,
+    "allowAccessibility": true,
+    "allowedDisplays": [],
+    "allowedApps": [],
+    "requireConfirmationForDangerousKeys": true,
+    "blockDangerousTerminalText": true
+  }
+}
+```
+
+Environment variables override stored configuration:
+
+| Variable | Meaning |
+| --- | --- |
+| `COMPUTER_USE_ENABLED` | Master opt-in switch; default is `false` |
+| `COMPUTER_USE_ALLOW_SCREENSHOTS` | Enable/disable screenshots |
+| `COMPUTER_USE_ALLOW_MOUSE` | Enable/disable pointer events |
+| `COMPUTER_USE_ALLOW_KEYBOARD` | Enable/disable keyboard events |
+| `COMPUTER_USE_ALLOW_ACCESSIBILITY` | Enable/disable Accessibility inspection |
+| `COMPUTER_USE_ALLOWED_DISPLAYS` | Comma-separated Core Graphics display IDs; empty means all |
+| `COMPUTER_USE_ALLOWED_APPS` | Comma-separated app names or bundle identifiers; empty means all |
+| `COMPUTER_USE_HELPER_PATH` | Optional local-only path to a precompiled helper executable; it cannot be set through MCP |
+
+Computer Use tools are hidden on Windows, Linux, and Docker. Those platforms continue to
+build and run all existing Desktop Commander capabilities.
+
+### macOS permissions
+
+Run `computer_check_permissions` first. With `prompt=true`, macOS can open the relevant
+permission prompts. Grant the **Desktop Commander Computer Use helper** access under:
+
+1. **System Settings -> Privacy & Security -> Screen & System Audio Recording** for
+   screenshots and complete window titles.
+2. **System Settings -> Privacy & Security -> Accessibility** for Accessibility inspection
+   and the separate Post Events authorization used by native mouse and keyboard events.
+
+Restart the client process that runs Desktop Commander after changing permissions. Missing
+permissions return a clear MCP error instead of an empty screenshot or a silent input failure.
+
+The helper uses Apple-native APIs: [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)
+with a Core Graphics fallback for PNG capture, Quartz
+[`CGEvent`](https://developer.apple.com/documentation/coregraphics/cgevent) for input,
+[Quartz Window Services](https://developer.apple.com/documentation/coregraphics/quartz-window-services)
+and `NSWorkspace` for windows, and the
+[macOS Accessibility API](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)
+for UI elements.
+
+### Tools
+
+| Tool | Important parameters | Result/action |
+| --- | --- | --- |
+| `computer_check_permissions` | `prompt?` | Screen Recording, Accessibility, and event-posting status |
+| `computer_get_screen_info` | none | Display IDs, logical/visible frames, pixels, scale, primary flag |
+| `computer_screenshot` | `displayId?`, `includeCursor?` | Timestamped PNG MCP image block plus display metadata |
+| `computer_get_windows` | `onScreenOnly?`, `limit?` | Allowed app, bundle ID, title, ID, bounds, active/on-screen/display state |
+| `computer_get_active_window` | none | Frontmost application window |
+| `computer_get_mouse_position` | none | Current global logical pointer position |
+| `computer_move_mouse` | `x`, `y` | Move without clicking |
+| `computer_click` | `x`, `y` | Left click |
+| `computer_double_click` | `x`, `y` | Native double click |
+| `computer_right_click` | `x`, `y` | Right click |
+| `computer_mouse_down` | `button?` | Hold left/right/middle button |
+| `computer_mouse_up` | `button?` | Release left/right/middle button |
+| `computer_drag` | `fromX`, `fromY`, `toX`, `toY`, `button?`, `durationMs?` | Timed native drag with full-path display validation |
+| `computer_scroll` | `deltaY`, `deltaX?` | Signed pixel scroll deltas |
+| `computer_type` | `text`, `intervalMs?`, `confirmed?` | Up to 20,000 Unicode characters; paced calls are limited to 30 seconds |
+| `computer_key` | `key`, `modifiers?`, `confirmed?` | Named key with optional modifiers |
+| `computer_hotkey` | `keys`, `confirmed?` | Shortcut such as `['command', 'space']` |
+| `computer_get_state` | none | Fresh displays, pointer, active window, and screenshot timestamp |
+| `computer_get_accessibility_tree` | `maxDepth?`, `maxNodes?` | Bounded frontmost-app UI tree |
+| `computer_get_focused_element` | none | Focused UI element metadata |
+
+Supported keyboard names include letters, digits, common punctuation, `escape`, `enter`,
+`tab`, `backspace`, `delete`, `space`, arrow keys, `home`, `end`, `pageup`, `pagedown`, and
+`F1` through `F12`. Modifiers are `command`, `control`, `option`, `shift`, and `fn`.
+
+### Screenshot image content and coordinates
+
+`computer_screenshot` returns the normal MCP result shape; it does not return a file path or
+a text-only base64 value:
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "Screenshot metadata: ..." },
+    { "type": "image", "data": "...base64 PNG...", "mimeType": "image/png" }
+  ]
+}
+```
+
+All pointer/window coordinates are **logical points in the
+[global Core Graphics display space](https://developer.apple.com/documentation/coregraphics/cgdisplaybounds%28_%3A%29)**:
+
+- `(0, 0)` is the upper-left corner of the primary display.
+- x grows to the right and y grows downward.
+- Displays placed left of or above the primary display can have negative origins.
+- `computer_get_screen_info` reports each display's logical bounds, physical pixel size,
+  Core Graphics display ID, and `scaleFactor`.
+- A Retina screenshot uses physical pixels. Convert a screenshot pixel to a click point with:
+
+  ```text
+  logical_x = display_x + pixel_x / scale_factor
+  logical_y = display_y + pixel_y / scale_factor
+  ```
+
+Coordinates are checked against the live display layout immediately before native events.
+A disconnected display or out-of-bounds point fails without posting the event.
+
+### Security and logging
+
+- The master switch defaults to off; screenshots, mouse, keyboard, Accessibility, displays,
+  and applications can be restricted independently.
+- `allowedApps` accepts exact application names or bundle identifiers. It filters window and
+  Accessibility metadata, checks the active app for keyboard/scroll actions, and checks the
+  topmost window for pointer actions. Native operations also recheck the expected process,
+  window ID, and allowed display immediately before acting; paced typing repeats the check so
+  a focus, window, or display change fails instead of redirecting input.
+- Display allowlists are applied before capture and again before native pointer events. An
+  omitted screenshot display selects a connected allowed display rather than briefly
+  capturing a disallowed primary display.
+- Application allowlists do not redact pixels from a full-display screenshot. Use
+  `allowedDisplays` or disable screenshots when pixel-level separation is required.
+- Potentially destructive shortcuts such as `command+q`, `command+w`, and
+  `control+command+q` require explicit user confirmation and `confirmed=true` by default.
+- Common privileged/power commands and recursive-force `rm` variants are blocked in known
+  terminal applications unless confirmed. This is a defense-in-depth mistake guard, not a
+  complete shell parser or execution sandbox.
+- `computer_type` content is replaced with `[REDACTED]` before shared audit/history logging.
+  Logs retain the tool name, timestamp, argument metadata, success/failure, duration, and
+  error without recording the typed string.
+- Screenshot base64 and Accessibility values are omitted from persistent local history and
+  Remote Device console logs. The actual result still reaches the requesting MCP client.
+- Secure Accessibility text fields return `[REDACTED]`.
+- Native actions are never automatically retried after a timeout, preventing a click or key
+  press from being executed twice. Drag and paced-typing timeout budgets include their
+  requested duration, concurrent native calls are serialized before their timeout begins,
+  and drag failures make a best-effort mouse-up before returning. A crashed helper is
+  restarted on the next call.
+
+### ChatGPT Web through Remote MCP
+
+When the Remote Device starts with Computer Use enabled, it obtains the expanded tool list
+from the local stdio MCP server and registers those tools with the existing hosted Remote
+MCP service. Calls and complete results travel through the existing authenticated Remote
+Device channel. The bridge preserves MCP content arrays, so the PNG remains an `image`
+content block instead of being flattened to text.
+
+Example request: "Open Safari, search for Apple M5 Ultra, and enter Apple's website."
+
+```text
+computer_get_windows
+computer_hotkey { "keys": ["command", "space"] }
+computer_type { "text": "Safari" }
+computer_key { "key": "enter" }
+computer_screenshot
+# inspect the returned image and current metadata
+computer_click { "x": 620, "y": 85 }
+computer_type { "text": "Apple M5 Ultra" }
+computer_key { "key": "enter" }
+computer_screenshot
+# continue the screenshot -> reason -> action loop until complete
+```
+
+The Remote Device repository code verifies that image blocks survive the local MCP client
+hop and JSON result storage. End-to-end payload limits and model vision behavior also depend
+on the separately deployed Remote MCP service and the selected web client, so validate a
+real PNG call after deployment.
+
+### Troubleshooting and known limits
+
+- `SCREEN_RECORDING_PERMISSION_REQUIRED`: grant Screen Recording and restart the process.
+- `ACCESSIBILITY_PERMISSION_REQUIRED`: grant Accessibility and restart the process.
+- `POST_EVENT_PERMISSION_REQUIRED`: grant Post Events access in the Accessibility privacy
+  pane and restart the process.
+- `HELPER_UNAVAILABLE`: install Xcode Command Line Tools or check
+  `COMPUTER_USE_HELPER_PATH`.
+- `INVALID_COORDINATES`: refresh display geometry and recalculate from screenshot pixels.
+- `APPLICATION_NOT_ALLOWED` / `DISPLAY_NOT_ALLOWED`: update the explicit policy allowlist.
+- `CONFIRMATION_REQUIRED`: ask the user, then repeat the call with `confirmed=true`.
+- `TARGET_CHANGED`: foreground or target-window identity changed after policy validation;
+  refresh state and retry rather than sending input to the new target.
+- `INVALID_CONFIGURATION`: fix the named Computer Use configuration field or environment
+  variable. Invalid allowlists never fall back to unrestricted access.
+- On macOS versions before ScreenCaptureKit's screenshot API, the Core Graphics fallback can
+  omit the cursor even when `includeCursor=true`.
+- Some applications perform their own key translation and can ignore Quartz Unicode event
+  text. Coordinate input and standard shortcuts remain available; application-specific
+  text fallbacks can be added later if a target app requires them.
+- Window titles can be empty before Screen Recording permission is granted.
+- Quartz does not distinguish every hidden/off-Space window from a minimized window without
+  extra Accessibility queries, so `minimized` is the conservative inverse of `onScreen`.
+- Real macOS GUI events cannot be validated in headless Linux CI. Unit tests use a complete
+  backend mock; `npm run test:integration` includes a macOS-gated native harness. Set
+  `COMPUTER_USE_INTEGRATION=1` for read-only native checks and additionally set
+  `COMPUTER_USE_INTEGRATION_MUTATIONS=1` only in a safe interactive test session. Set
+  `COMPUTER_USE_INTEGRATION_TYPE_TEXT=1` only with a disposable focused text field.
+
 ## Updating & Uninstalling Desktop Commander
 
 ### Automatic Updates (Options 1, 2, 3, 4 & 6)

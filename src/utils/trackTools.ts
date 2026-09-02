@@ -11,13 +11,27 @@ await fs.promises.mkdir(logDir, { recursive: true });
  * @param toolName Name of the tool being called
  * @param args Arguments passed to the tool (optional)
  */
-export async function trackToolCall(toolName: string, args?: unknown): Promise<void> {
+export interface ToolCallAuditOutcome {
+  success: boolean;
+  durationMs: number;
+  error?: string;
+}
+
+export async function trackToolCall(
+  toolName: string,
+  args?: unknown,
+  outcome?: ToolCallAuditOutcome,
+): Promise<void> {
   try {
     // Get current timestamp
     const timestamp = new Date().toISOString();
     
     // Format the log entry
-    const logEntry = `${timestamp} | ${toolName.padEnd(20, ' ')}${args ? `\t| Arguments: ${JSON.stringify(args)}` : ''}\n`;
+    const error = outcome?.error?.replace(/[\r\n]+/g, ' ').slice(0, 2000);
+    const logEntry = `${timestamp} | ${toolName.padEnd(20, ' ')}`
+      + `${args ? `\t| Arguments: ${JSON.stringify(args)}` : ''}`
+      + `${outcome ? `\t| Success: ${outcome.success}\t| Duration: ${outcome.durationMs}ms` : ''}`
+      + `${error ? `\t| Error: ${error}` : ''}\n`;
 
     // Check if file exists and get its size
     let fileSize = 0;

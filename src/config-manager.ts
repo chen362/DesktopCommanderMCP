@@ -5,6 +5,7 @@ import { mkdir } from 'fs/promises';
 import os from 'os';
 import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
+import type { ComputerUseConfig } from './computer-use/types.js';
 
 export interface ServerConfig {
   blockedCommands?: string[];
@@ -15,12 +16,29 @@ export interface ServerConfig {
   fileReadLineLimit?: number; // Default line limit for file read operations (changed from character-based)
   clientId?: string; // Unique client identifier for analytics
   currentClient?: ClientInfo; // Current connected client information
+  computerUse?: Partial<ComputerUseConfig>;
   [key: string]: any; // Allow for arbitrary configuration keys (including abTest_* keys)
 }
 
 export interface ClientInfo {
   name: string;
   version: string;
+}
+
+function createDefaultComputerUseConfig(): ComputerUseConfig {
+  return {
+    enabled: false,
+    allowScreenshots: true,
+    allowMouse: true,
+    allowKeyboard: true,
+    allowAccessibility: true,
+    allowedDisplays: [],
+    allowedApps: [],
+    requireConfirmationForDangerousKeys: true,
+    blockDangerousTerminalText: true,
+    requestTimeoutMs: 10000,
+    screenshotTimeoutMs: 20000,
+  };
 }
 
 export function normalizeTelemetryEnabledValue(value: unknown): unknown {
@@ -91,6 +109,10 @@ class ConfigManager {
         if (this.config['welcomeOnboardingEligible'] === undefined) {
           this.config['welcomeOnboardingEligible'] = false;
           this.config['pendingWelcomeOnboarding'] = false;
+          await this.saveConfig();
+        }
+        if (this.config.computerUse === undefined) {
+          this.config.computerUse = createDefaultComputerUseConfig();
           await this.saveConfig();
         }
       } catch (error) {
@@ -183,6 +205,7 @@ class ConfigManager {
       telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
       fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      computerUse: createDefaultComputerUseConfig(),
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
       welcomeOnboardingEligible: true // Distinguishes new installs from migrated legacy configs
     };
