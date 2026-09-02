@@ -20,6 +20,7 @@ import type {
   KeyboardModifier,
   NativeTargetGuard,
   Point,
+  Rect,
   WindowInfo,
 } from './types.js';
 import { MacOSComputerUseBackend } from './macos/backend.js';
@@ -33,9 +34,9 @@ function jsonResult(label: string, value: unknown, structuredContent?: Record<st
   };
 }
 
-function pointInsideWindow(point: Point, window: WindowInfo): boolean {
-  return point.x >= window.x && point.y >= window.y
-    && point.x < window.x + window.width && point.y < window.y + window.height;
+function pointInsideRect(point: Point, rect: Rect): boolean {
+  return point.x >= rect.x && point.y >= rect.y
+    && point.x < rect.x + rect.width && point.y < rect.y + rect.height;
 }
 
 export class ComputerUseService {
@@ -102,7 +103,7 @@ export class ComputerUseService {
 
   private async pointTarget(point: Point, config: ComputerUseConfig): Promise<WindowInfo | null> {
     const windows = await this.backend.getWindows({ onScreenOnly: true, limit: 200 });
-    const target = windows.find((window) => pointInsideWindow(point, window)) ?? null;
+    const target = windows.find((window) => pointInsideRect(point, window)) ?? null;
     assertApplicationAllowed(target, config.allowedApps);
     return target;
   }
@@ -337,7 +338,7 @@ export class ComputerUseService {
         const displays = this.filterDisplays(allDisplays, config);
         const rawMousePosition = await this.backend.getMousePosition();
         const mousePosition = config.allowedDisplays.length === 0
-          || displays.some((display) => pointInsideWindow(rawMousePosition, display))
+          || displays.some((display) => pointInsideRect(rawMousePosition, display))
           ? rawMousePosition
           : null;
         const rawActiveWindow = await this.backend.getActiveWindow();
