@@ -27,6 +27,7 @@ integration.mcpClient = {
 
 const forwardedResult = await integration.callClientTool('computer_screenshot', { includeCursor: true }, {
   clientInfo: { name: 'openai-mcp', version: 'test' },
+  remote: false,
 });
 assert(forwardedRequest._meta.remote === true, 'remote marker was not added');
 assert(forwardedResult.content[1].type === 'image', 'image content type was flattened');

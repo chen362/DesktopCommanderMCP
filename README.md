@@ -559,7 +559,7 @@ Environment variables override stored configuration:
 | `COMPUTER_USE_ALLOW_ACCESSIBILITY` | Enable/disable Accessibility inspection |
 | `COMPUTER_USE_ALLOWED_DISPLAYS` | Comma-separated Core Graphics display IDs; empty means all |
 | `COMPUTER_USE_ALLOWED_APPS` | Comma-separated app names or bundle identifiers; empty means all |
-| `COMPUTER_USE_HELPER_PATH` | Optional path to a precompiled helper executable |
+| `COMPUTER_USE_HELPER_PATH` | Optional local-only path to a precompiled helper executable; it cannot be set through MCP |
 
 Computer Use tools are hidden on Windows, Linux, and Docker. Those platforms continue to
 build and run all existing Desktop Commander capabilities.
@@ -571,11 +571,11 @@ permission prompts. Grant the **Desktop Commander Computer Use helper** access u
 
 1. **System Settings -> Privacy & Security -> Screen & System Audio Recording** for
    screenshots and complete window titles.
-2. **System Settings -> Privacy & Security -> Accessibility** for native mouse and keyboard
-   events and Accessibility inspection.
+2. **System Settings -> Privacy & Security -> Accessibility** for Accessibility inspection
+   and the separate Post Events authorization used by native mouse and keyboard events.
 
-Restart the Remote Device process after changing permissions. Missing permissions return a
-clear MCP error instead of an empty screenshot or a silent input failure.
+Restart the client process that runs Desktop Commander after changing permissions. Missing
+permissions return a clear MCP error instead of an empty screenshot or a silent input failure.
 
 The helper uses Apple-native APIs: [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)
 with a Core Graphics fallback for PNG capture, Quartz
@@ -592,7 +592,7 @@ for UI elements.
 | `computer_check_permissions` | `prompt?` | Screen Recording, Accessibility, and event-posting status |
 | `computer_get_screen_info` | none | Display IDs, logical/visible frames, pixels, scale, primary flag |
 | `computer_screenshot` | `displayId?`, `includeCursor?` | Timestamped PNG MCP image block plus display metadata |
-| `computer_get_windows` | `onScreenOnly?`, `limit?` | App, bundle ID, title, ID, bounds, active/minimized/display state |
+| `computer_get_windows` | `onScreenOnly?`, `limit?` | Allowed app, bundle ID, title, ID, bounds, active/on-screen/display state |
 | `computer_get_active_window` | none | Frontmost application window |
 | `computer_get_mouse_position` | none | Current global logical pointer position |
 | `computer_move_mouse` | `x`, `y` | Move without clicking |
@@ -601,9 +601,9 @@ for UI elements.
 | `computer_right_click` | `x`, `y` | Right click |
 | `computer_mouse_down` | `button?` | Hold left/right/middle button |
 | `computer_mouse_up` | `button?` | Release left/right/middle button |
-| `computer_drag` | `fromX`, `fromY`, `toX`, `toY`, `button?`, `durationMs?` | Timed native drag |
+| `computer_drag` | `fromX`, `fromY`, `toX`, `toY`, `button?`, `durationMs?` | Timed native drag with full-path display validation |
 | `computer_scroll` | `deltaY`, `deltaX?` | Signed pixel scroll deltas |
-| `computer_type` | `text`, `intervalMs?`, `confirmed?` | Unicode text, including Chinese |
+| `computer_type` | `text`, `intervalMs?`, `confirmed?` | Up to 20,000 Unicode characters; paced calls are limited to 30 seconds |
 | `computer_key` | `key`, `modifiers?`, `confirmed?` | Named key with optional modifiers |
 | `computer_hotkey` | `keys`, `confirmed?` | Shortcut such as `['command', 'space']` |
 | `computer_get_state` | none | Fresh displays, pointer, active window, and screenshot timestamp |
@@ -650,11 +650,21 @@ A disconnected display or out-of-bounds point fails without posting the event.
 
 - The master switch defaults to off; screenshots, mouse, keyboard, Accessibility, displays,
   and applications can be restricted independently.
-- `allowedApps` accepts exact application names or bundle identifiers. Keyboard and scroll
-  actions check the active app; clicks and drags check the topmost window at the target.
+- `allowedApps` accepts exact application names or bundle identifiers. It filters window and
+  Accessibility metadata, checks the active app for keyboard/scroll actions, and checks the
+  topmost window for pointer actions. Native operations also recheck the expected process,
+  window ID, and allowed display immediately before acting; paced typing repeats the check so
+  a focus, window, or display change fails instead of redirecting input.
+- Display allowlists are applied before capture and again before native pointer events. An
+  omitted screenshot display selects a connected allowed display rather than briefly
+  capturing a disallowed primary display.
+- Application allowlists do not redact pixels from a full-display screenshot. Use
+  `allowedDisplays` or disable screenshots when pixel-level separation is required.
 - Potentially destructive shortcuts such as `command+q`, `command+w`, and
   `control+command+q` require explicit user confirmation and `confirmed=true` by default.
-- Obvious destructive terminal text is blocked in configured terminal applications unless confirmed.
+- Common privileged/power commands and recursive-force `rm` variants are blocked in known
+  terminal applications unless confirmed. This is a defense-in-depth mistake guard, not a
+  complete shell parser or execution sandbox.
 - `computer_type` content is replaced with `[REDACTED]` before shared audit/history logging.
   Logs retain the tool name, timestamp, argument metadata, success/failure, duration, and
   error without recording the typed string.
@@ -662,7 +672,10 @@ A disconnected display or out-of-bounds point fails without posting the event.
   Remote Device console logs. The actual result still reaches the requesting MCP client.
 - Secure Accessibility text fields return `[REDACTED]`.
 - Native actions are never automatically retried after a timeout, preventing a click or key
-  press from being executed twice. A crashed helper is restarted on the next call.
+  press from being executed twice. Drag and paced-typing timeout budgets include their
+  requested duration, concurrent native calls are serialized before their timeout begins,
+  and drag failures make a best-effort mouse-up before returning. A crashed helper is
+  restarted on the next call.
 
 ### ChatGPT Web through Remote MCP
 
@@ -697,17 +710,25 @@ real PNG call after deployment.
 
 - `SCREEN_RECORDING_PERMISSION_REQUIRED`: grant Screen Recording and restart the process.
 - `ACCESSIBILITY_PERMISSION_REQUIRED`: grant Accessibility and restart the process.
+- `POST_EVENT_PERMISSION_REQUIRED`: grant Post Events access in the Accessibility privacy
+  pane and restart the process.
 - `HELPER_UNAVAILABLE`: install Xcode Command Line Tools or check
   `COMPUTER_USE_HELPER_PATH`.
 - `INVALID_COORDINATES`: refresh display geometry and recalculate from screenshot pixels.
 - `APPLICATION_NOT_ALLOWED` / `DISPLAY_NOT_ALLOWED`: update the explicit policy allowlist.
 - `CONFIRMATION_REQUIRED`: ask the user, then repeat the call with `confirmed=true`.
+- `TARGET_CHANGED`: foreground or target-window identity changed after policy validation;
+  refresh state and retry rather than sending input to the new target.
+- `INVALID_CONFIGURATION`: fix the named Computer Use configuration field or environment
+  variable. Invalid allowlists never fall back to unrestricted access.
 - On macOS versions before ScreenCaptureKit's screenshot API, the Core Graphics fallback can
   omit the cursor even when `includeCursor=true`.
 - Some applications perform their own key translation and can ignore Quartz Unicode event
   text. Coordinate input and standard shortcuts remain available; application-specific
   text fallbacks can be added later if a target app requires them.
 - Window titles can be empty before Screen Recording permission is granted.
+- Quartz does not distinguish every hidden/off-Space window from a minimized window without
+  extra Accessibility queries, so `minimized` is the conservative inverse of `onScreen`.
 - Real macOS GUI events cannot be validated in headless Linux CI. Unit tests use a complete
   backend mock; `npm run test:integration` includes a macOS-gated native harness. Set
   `COMPUTER_USE_INTEGRATION=1` for read-only native checks and additionally set

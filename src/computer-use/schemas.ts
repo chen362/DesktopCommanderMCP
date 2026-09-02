@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const coordinate = z.number().finite();
+const displayId = z.number().int().min(0).max(0xFFFF_FFFF);
 const MouseButtonSchema = z.enum(['left', 'right', 'middle']);
 const KeyboardModifierSchema = z.enum(['command', 'control', 'option', 'shift', 'fn']);
 
@@ -10,11 +11,10 @@ export const ComputerUseConfigValueSchema = z.object({
   allowMouse: z.boolean().optional(),
   allowKeyboard: z.boolean().optional(),
   allowAccessibility: z.boolean().optional(),
-  allowedDisplays: z.array(z.number().int().nonnegative()).optional(),
-  allowedApps: z.array(z.string().min(1)).optional(),
+  allowedDisplays: z.array(displayId).optional(),
+  allowedApps: z.array(z.string().trim().min(1)).optional(),
   requireConfirmationForDangerousKeys: z.boolean().optional(),
   blockDangerousTerminalText: z.boolean().optional(),
-  helperPath: z.string().min(1).optional(),
   requestTimeoutMs: z.number().int().min(100).max(120_000).optional(),
   screenshotTimeoutMs: z.number().int().min(100).max(120_000).optional(),
 }).strict();
@@ -26,7 +26,7 @@ export const ComputerCheckPermissionsArgsSchema = z.object({
 export const ComputerGetScreenInfoArgsSchema = z.object({});
 
 export const ComputerScreenshotArgsSchema = z.object({
-  displayId: z.number().int().nonnegative().optional(),
+  displayId: displayId.optional(),
   includeCursor: z.boolean().optional().default(true),
 });
 
@@ -69,19 +69,24 @@ export const ComputerScrollArgsSchema = z.object({
 });
 
 export const ComputerTypeArgsSchema = z.object({
-  text: z.string().max(100_000),
+  text: z.string().max(20_000),
   intervalMs: z.number().int().min(0).max(1_000).optional().default(0),
   confirmed: z.boolean().optional().default(false),
+}).refine((value) => {
+  const intervals = Math.max(0, Array.from(value.text).length - 1);
+  return intervals * value.intervalMs <= 30_000;
+}, {
+  message: 'The requested typing interval would take over 30 seconds; split the text into smaller calls',
 });
 
 export const ComputerKeyArgsSchema = z.object({
-  key: z.string().min(1).max(32),
+  key: z.string().trim().min(1).max(32),
   modifiers: z.array(KeyboardModifierSchema).max(5).optional().default([]),
   confirmed: z.boolean().optional().default(false),
 });
 
 export const ComputerHotkeyArgsSchema = z.object({
-  keys: z.array(z.string().min(1).max(32)).min(2).max(6),
+  keys: z.array(z.string().trim().min(1).max(32)).min(2).max(6),
   confirmed: z.boolean().optional().default(false),
 }).refine((value) => value.keys.filter((key) =>
   !['command', 'control', 'option', 'shift', 'fn'].includes(key.trim().toLowerCase())).length === 1, {

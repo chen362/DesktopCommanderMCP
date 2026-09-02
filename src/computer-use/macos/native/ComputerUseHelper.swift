@@ -45,21 +45,38 @@ final class ComputerUseHelper {
         case "moveMouse":
             try ensureInputPermission()
             let point = try point(params)
-            try validate(point)
+            let inputGuard = dictionary(params, "guard")
+            try validate(point, allowedDisplayIDs: displayIDs(inputGuard, "allowedDisplayIds"))
             try postMouse(type: .mouseMoved, point: point, button: .left)
             return ["completed": true]
         case "click":
             try ensureInputPermission()
             let point = try point(params)
-            try validate(point)
+            let inputGuard = dictionary(params, "guard")
+            try validate(point, allowedDisplayIDs: displayIDs(inputGuard, "allowedDisplayIds"))
+            try ensureExpectedTarget(
+                inputGuard,
+                point: point,
+                processKey: "expectedProcessId",
+                windowKey: "expectedWindowId"
+            )
             let button = try mouseButton(string(params, "button"))
             let count = integer(params, "clickCount", default: 1)
             try click(point: point, button: button, count: count)
             return ["completed": true]
         case "mouseDown":
             try ensureInputPermission()
+            let inputGuard = dictionary(params, "guard")
+            let point = currentMousePosition()
+            try validate(point, allowedDisplayIDs: displayIDs(inputGuard, "allowedDisplayIds"))
+            try ensureExpectedTarget(
+                inputGuard,
+                point: point,
+                processKey: "expectedProcessId",
+                windowKey: "expectedWindowId"
+            )
             let button = try mouseButton(string(params, "button"))
-            try postMouse(type: mouseEventType(button: button, down: true), point: currentMousePosition(), button: button)
+            try postMouse(type: mouseEventType(button: button, down: true), point: point, button: button)
             return ["completed": true]
         case "mouseUp":
             try ensureInputPermission()
@@ -72,14 +89,21 @@ final class ComputerUseHelper {
             return ["completed": true]
         case "scroll":
             try ensureInputPermission()
+            try ensureExpectedActiveTarget(dictionary(params, "guard"))
             try scroll(deltaX: integer(params, "deltaX", default: 0), deltaY: integer(params, "deltaY"))
             return ["completed": true]
         case "typeText":
             try ensureInputPermission()
-            try typeText(string(params, "text"), intervalMs: integer(params, "intervalMs", default: 0))
+            let inputGuard = dictionary(params, "guard")
+            try typeText(
+                string(params, "text"),
+                intervalMs: integer(params, "intervalMs", default: 0),
+                inputGuard: inputGuard
+            )
             return ["completed": true]
         case "key":
             try ensureInputPermission()
+            try ensureExpectedActiveTarget(dictionary(params, "guard"))
             try pressKey(
                 string(params, "key"),
                 modifiers: stringArray(params, "modifiers")
@@ -87,17 +111,23 @@ final class ComputerUseHelper {
             return ["completed": true]
         case "hotkey":
             try ensureInputPermission()
+            try ensureExpectedActiveTarget(dictionary(params, "guard"))
             try hotkey(stringArray(params, "keys"))
             return ["completed": true]
         case "accessibilityTree":
             try ensureAccessibilityPermission()
+            let targetGuard = dictionary(params, "guard")
+            try ensureExpectedActiveTarget(targetGuard)
             return try accessibilityTree(
                 maxDepth: integer(params, "maxDepth", default: 3),
-                maxNodes: integer(params, "maxNodes", default: 200)
+                maxNodes: integer(params, "maxNodes", default: 200),
+                expectedProcessID: processID(targetGuard, "expectedProcessId")
             )
         case "focusedElement":
             try ensureAccessibilityPermission()
-            return try focusedElement().map { $0 as Any } ?? NSNull()
+            let targetGuard = dictionary(params, "guard")
+            try ensureExpectedActiveTarget(targetGuard)
+            return try focusedElement(expectedProcessID: processID(targetGuard, "expectedProcessId")).map { $0 as Any } ?? NSNull()
         default:
             throw HelperFailure("NATIVE_OPERATION_FAILED", "Unknown helper action: \(action)")
         }
@@ -128,6 +158,30 @@ final class ComputerUseHelper {
 
     private func stringArray(_ params: [String: Any], _ key: String) -> [String] {
         return params[key] as? [String] ?? []
+    }
+
+    private func dictionary(_ params: [String: Any], _ key: String) -> [String: Any] {
+        return params[key] as? [String: Any] ?? [:]
+    }
+
+    private func displayIDs(_ params: [String: Any], _ key: String) -> [CGDirectDisplayID] {
+        guard let values = params[key] as? [NSNumber] else { return [] }
+        return values.map { CGDirectDisplayID($0.uint32Value) }
+    }
+
+    private func processID(_ params: [String: Any], _ key: String) -> pid_t? {
+        guard let value = params[key] as? NSNumber else { return nil }
+        return pid_t(value.int32Value)
+    }
+
+    private func unsignedInteger(_ params: [String: Any], _ key: String) -> UInt32? {
+        guard let value = params[key] as? NSNumber else { return nil }
+        return value.uint32Value
+    }
+
+    private func windowID(_ params: [String: Any], _ key: String) -> CGWindowID? {
+        guard let value = unsignedInteger(params, key) else { return nil }
+        return CGWindowID(value)
     }
 
     private func point(_ params: [String: Any]) throws -> CGPoint {
@@ -182,10 +236,74 @@ final class ComputerUseHelper {
     }
 
     private func ensureInputPermission() throws {
-        if !accessibilityTrusted(prompt: false) && !CGPreflightPostEventAccess() {
+        if !CGPreflightPostEventAccess() {
             throw HelperFailure(
-                "ACCESSIBILITY_PERMISSION_REQUIRED",
-                "Accessibility permission is required to post mouse and keyboard events. Open System Settings -> Privacy & Security -> Accessibility and enable the Desktop Commander Computer Use helper."
+                "POST_EVENT_PERMISSION_REQUIRED",
+                "Post Events permission is required for mouse and keyboard input. Open System Settings -> Privacy & Security -> Accessibility and enable the Desktop Commander Computer Use helper."
+            )
+        }
+    }
+
+    private func ensureExpectedFrontmostProcess(_ expectedProcessID: pid_t?) throws {
+        guard let expectedProcessID else { return }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedProcessID else {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The frontmost application changed after policy validation. Refresh state and retry the action."
+            )
+        }
+    }
+
+    private func ensureExpectedActiveTarget(_ params: [String: Any]) throws {
+        try ensureExpectedFrontmostProcess(processID(params, "expectedProcessId"))
+        let expectedWindowID = windowID(params, "expectedWindowId")
+        let allowedDisplayIDs = displayIDs(params, "allowedDisplayIds")
+        if expectedWindowID == nil && allowedDisplayIDs.isEmpty { return }
+
+        guard let window = try activeWindow() else {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The active window changed after policy validation. Refresh state and retry the action."
+            )
+        }
+        if let expectedWindowID, windowID(window, "windowId") != expectedWindowID {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The active window changed after policy validation. Refresh state and retry the action."
+            )
+        }
+        if !allowedDisplayIDs.isEmpty {
+            guard let currentDisplayID = unsignedInteger(window, "displayId"),
+                  allowedDisplayIDs.contains(CGDirectDisplayID(currentDisplayID)) else {
+                throw HelperFailure(
+                    "DISPLAY_NOT_ALLOWED",
+                    "The active window moved to a display that is not allowed by the Computer Use policy."
+                )
+            }
+        }
+    }
+
+    private func ensureExpectedTarget(
+        _ params: [String: Any],
+        point: CGPoint,
+        processKey: String,
+        windowKey: String
+    ) throws {
+        let expectedProcessID = processID(params, processKey)
+        let expectedWindowID = windowID(params, windowKey)
+        if expectedProcessID == nil && expectedWindowID == nil { return }
+        guard let actual = windowIdentity(at: point) else {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The window at the target coordinate changed after policy validation. Refresh state and retry the action."
+            )
+        }
+        let processMatches = expectedProcessID.map { actual.processID == $0 } ?? true
+        let windowMatches = expectedWindowID.map { actual.windowID == $0 } ?? true
+        guard processMatches && windowMatches else {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The window at the target coordinate changed after policy validation. Refresh state and retry the action."
             )
         }
     }
@@ -312,17 +430,45 @@ final class ComputerUseHelper {
         ]
     }
 
-    private func validate(_ point: CGPoint) throws {
-        let valid = try activeDisplayIDs().contains { CGDisplayBounds($0).contains(point) }
-        if !valid {
+    @discardableResult
+    private func validate(
+        _ point: CGPoint,
+        allowedDisplayIDs: [CGDirectDisplayID] = []
+    ) throws -> CGDirectDisplayID {
+        return try validate(
+            point,
+            displays: activeDisplayIDs(),
+            allowedDisplayIDs: allowedDisplayIDs
+        )
+    }
+
+    @discardableResult
+    private func validate(
+        _ point: CGPoint,
+        displays: [CGDirectDisplayID],
+        allowedDisplayIDs: [CGDirectDisplayID]
+    ) throws -> CGDirectDisplayID {
+        guard let displayID = displays.first(where: { contains(point, in: CGDisplayBounds($0)) }) else {
             throw HelperFailure(
                 "INVALID_COORDINATES",
                 "Coordinates (\(point.x), \(point.y)) are outside all connected displays. Refresh with computer_get_screen_info."
             )
         }
+        if !allowedDisplayIDs.isEmpty && !allowedDisplayIDs.contains(displayID) {
+            throw HelperFailure(
+                "DISPLAY_NOT_ALLOWED",
+                "The target coordinate is not on a display allowed by the Computer Use policy."
+            )
+        }
+        return displayID
     }
 
     // MARK: - Windows
+
+    private func contains(_ point: CGPoint, in rect: CGRect) -> Bool {
+        return point.x >= rect.minX && point.y >= rect.minY
+            && point.x < rect.maxX && point.y < rect.maxY
+    }
 
     private func screenIndex(for bounds: CGRect, displays: [CGDirectDisplayID]) -> Int? {
         var bestIndex: Int?
@@ -338,12 +484,37 @@ final class ComputerUseHelper {
         return bestIndex
     }
 
-    private func windowDictionary(_ info: [String: Any], displays: [CGDirectDisplayID], frontmostPID: pid_t?) -> [String: Any]? {
+    private func windowBounds(_ info: [String: Any]) -> CGRect? {
+        guard let boundsValue = info[kCGWindowBounds as String] else { return nil }
+        return CGRect(dictionaryRepresentation: boundsValue as! CFDictionary)
+    }
+
+    private func windowIdentity(at point: CGPoint) -> (processID: pid_t, windowID: CGWindowID)? {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for info in raw {
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            guard layer == 0, alpha > 0,
+                  let bounds = windowBounds(info), contains(point, in: bounds) else { continue }
+            let processID = pid_t((info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0)
+            let windowID = CGWindowID((info[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0)
+            if processID > 0 && windowID > 0 { return (processID, windowID) }
+        }
+        return nil
+    }
+
+    private func windowDictionary(
+        _ info: [String: Any],
+        displays: [CGDirectDisplayID],
+        frontmostPID: pid_t?,
+        activeWindowID: CGWindowID?
+    ) -> [String: Any]? {
         let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
         guard layer == 0 else { return nil }
-        guard let boundsValue = info[kCGWindowBounds as String] else { return nil }
-        let boundsRaw = boundsValue as! CFDictionary
-        guard let bounds = CGRect(dictionaryRepresentation: boundsRaw),
+        guard let bounds = windowBounds(info),
               bounds.width > 0, bounds.height > 0 else { return nil }
         let processID = pid_t((info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0)
         guard processID > 0 else { return nil }
@@ -353,22 +524,24 @@ final class ComputerUseHelper {
             ?? ""
         let onScreen = (info[kCGWindowIsOnscreen as String] as? Bool) ?? false
         let isFrontmost = frontmostPID == processID
+        let currentWindowID = windowID(info, kCGWindowNumber as String)
         let screen = screenIndex(for: bounds, displays: displays)
         return [
             "applicationName": applicationName,
             "bundleIdentifier": jsonValue(application?.bundleIdentifier),
             "processId": Int(processID),
-            "windowId": jsonValue((info[kCGWindowNumber as String] as? NSNumber)?.intValue),
+            "windowId": jsonValue(currentWindowID.map { Int($0) }),
             "title": (info[kCGWindowName as String] as? String) ?? "",
             "x": Double(bounds.origin.x),
             "y": Double(bounds.origin.y),
             "width": Double(bounds.width),
             "height": Double(bounds.height),
-            "active": isFrontmost && onScreen,
+            "active": isFrontmost && onScreen && currentWindowID != nil && currentWindowID == activeWindowID,
             "frontmost": isFrontmost,
             "minimized": !onScreen,
             "onScreen": onScreen,
             "screenIndex": jsonValue(screen),
+            "displayId": jsonValue(screen.map { Int(displays[$0]) }),
         ]
     }
 
@@ -381,9 +554,15 @@ final class ComputerUseHelper {
         }
         let displays = try activeDisplayIDs()
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let activeWindowID = try activeWindow().flatMap { windowID($0, "windowId") }
         var result: [[String: Any]] = []
         for info in raw {
-            if let window = windowDictionary(info, displays: displays, frontmostPID: frontmostPID) {
+            if let window = windowDictionary(
+                info,
+                displays: displays,
+                frontmostPID: frontmostPID,
+                activeWindowID: activeWindowID
+            ) {
                 result.append(window)
                 if result.count >= max(1, limit) { break }
             }
@@ -394,14 +573,25 @@ final class ComputerUseHelper {
     private func activeWindow() throws -> [String: Any]? {
         guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
         let displays = try activeDisplayIDs()
-        guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        for info in raw {
-            let pid = pid_t((info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0)
-            if pid == frontmostPID,
-               let window = windowDictionary(info, displays: displays, frontmostPID: frontmostPID) {
-                return window
+        let optionSets: [CGWindowListOption] = [
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            [.optionAll, .excludeDesktopElements],
+        ]
+        for options in optionSets {
+            guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+                continue
+            }
+            for info in raw {
+                let pid = pid_t((info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0)
+                if pid == frontmostPID,
+                   let window = windowDictionary(
+                       info,
+                       displays: displays,
+                       frontmostPID: frontmostPID,
+                       activeWindowID: windowID(info, kCGWindowNumber as String)
+                   ) {
+                    return window
+                }
             }
         }
         return nil
@@ -464,22 +654,73 @@ final class ComputerUseHelper {
     private func drag(_ params: [String: Any]) throws {
         let from = try nestedPoint(params, "from")
         let to = try nestedPoint(params, "to")
-        try validate(from)
-        try validate(to)
+        let inputGuard = dictionary(params, "guard")
+        let allowedDisplayIDs = displayIDs(inputGuard, "allowedDisplayIds")
+        try validate(from, allowedDisplayIDs: allowedDisplayIDs)
+        try validate(to, allowedDisplayIDs: allowedDisplayIDs)
+        try ensureExpectedTarget(
+            inputGuard,
+            point: from,
+            processKey: "expectedProcessId",
+            windowKey: "expectedWindowId"
+        )
+        try ensureExpectedTarget(
+            inputGuard,
+            point: to,
+            processKey: "expectedDestinationProcessId",
+            windowKey: "expectedDestinationWindowId"
+        )
         let button = try mouseButton(string(params, "button"))
         let durationMs = max(0, min(10_000, integer(params, "durationMs", default: 500)))
-        try postMouse(type: mouseEventType(button: button, down: true), point: from, button: button)
         let steps = max(1, durationMs / 16)
-        for step in 1...steps {
+        func pointAtStep(_ step: Int) -> CGPoint {
             let progress = CGFloat(step) / CGFloat(steps)
-            let point = CGPoint(
+            return CGPoint(
                 x: from.x + (to.x - from.x) * progress,
                 y: from.y + (to.y - from.y) * progress
             )
+        }
+        let displaySnapshot = try activeDisplayIDs()
+        for step in 0...steps {
+            try validate(
+                pointAtStep(step),
+                displays: displaySnapshot,
+                allowedDisplayIDs: allowedDisplayIDs
+            )
+        }
+        try postMouse(type: mouseEventType(button: button, down: true), point: from, button: button)
+        var released = false
+        var releasePoint = from
+        defer {
+            if !released {
+                try? postMouse(type: mouseEventType(button: button, down: false), point: releasePoint, button: button)
+            }
+        }
+        for step in 1...steps {
+            let point = pointAtStep(step)
+            try validate(point, allowedDisplayIDs: allowedDisplayIDs)
+            if step == steps {
+                try ensureExpectedTarget(
+                    inputGuard,
+                    point: to,
+                    processKey: "expectedDestinationProcessId",
+                    windowKey: "expectedDestinationWindowId"
+                )
+            }
             try postMouse(type: draggedEventType(button: button), point: point, button: button)
+            releasePoint = point
             if durationMs > 0 { Thread.sleep(forTimeInterval: Double(durationMs) / Double(steps) / 1000.0) }
         }
+        releasePoint = from
+        try ensureExpectedTarget(
+            inputGuard,
+            point: to,
+            processKey: "expectedDestinationProcessId",
+            windowKey: "expectedDestinationWindowId"
+        )
+        releasePoint = to
         try postMouse(type: mouseEventType(button: button, down: false), point: to, button: button)
+        released = true
     }
 
     private func scroll(deltaX: Int, deltaY: Int) throws {
@@ -591,9 +832,25 @@ final class ComputerUseHelper {
         return chunks
     }
 
-    private func typeText(_ text: String, intervalMs: Int) throws {
+    private func textInputChunks(_ text: String, intervalMs: Int) -> [[UInt16]] {
+        if intervalMs > 0 {
+            return text.map { Array(String($0).utf16) }
+        }
+        return unicodeChunks(text)
+    }
+
+    private func typeText(_ text: String, intervalMs: Int, inputGuard: [String: Any]) throws {
         let source = CGEventSource(stateID: .hidSystemState)
-        for chunk in unicodeChunks(text) {
+        let chunks = textInputChunks(text, intervalMs: intervalMs)
+        let expectedProcessID = processID(inputGuard, "expectedProcessId")
+        var lastTargetValidation = Date.distantPast
+        for (index, chunk) in chunks.enumerated() {
+            try ensureExpectedFrontmostProcess(expectedProcessID)
+            let now = Date()
+            if now.timeIntervalSince(lastTargetValidation) >= 0.25 {
+                try ensureExpectedActiveTarget(inputGuard)
+                lastTargetValidation = now
+            }
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
                 throw HelperFailure("NATIVE_OPERATION_FAILED", "Could not create a Unicode keyboard event.")
@@ -604,7 +861,9 @@ final class ComputerUseHelper {
             }
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
-            if intervalMs > 0 { Thread.sleep(forTimeInterval: Double(intervalMs) / 1000.0) }
+            if intervalMs > 0 && index < chunks.count - 1 {
+                Thread.sleep(forTimeInterval: Double(intervalMs) / 1000.0)
+            }
         }
     }
 
@@ -616,7 +875,8 @@ final class ComputerUseHelper {
     }
 
     private func axString(_ element: AXUIElement, _ attribute: CFString) -> String? {
-        return axValue(element, attribute) as? String
+        guard let value = axValue(element, attribute) as? String else { return nil }
+        return String(value.prefix(2_000))
     }
 
     private func axBool(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
@@ -635,8 +895,10 @@ final class ComputerUseHelper {
         return AXValueGetValue(raw as! AXValue, .cgSize, &value) ? value : nil
     }
 
-    private func safeAccessibilityValue(_ element: AXUIElement, role: String?) -> Any {
-        if role == "AXSecureTextField" { return "[REDACTED]" }
+    private func safeAccessibilityValue(_ element: AXUIElement, role: String?, subrole: String?) -> Any {
+        if role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String) {
+            return "[REDACTED]"
+        }
         guard let raw = axValue(element, kAXValueAttribute as CFString) else { return NSNull() }
         if let text = raw as? String { return String(text.prefix(2_000)) }
         if let number = raw as? NSNumber { return number }
@@ -653,10 +915,12 @@ final class ComputerUseHelper {
         if count >= maxNodes { return ["truncated": true] }
         count += 1
         let role = axString(element, kAXRoleAttribute as CFString)
+        let subrole = axString(element, kAXSubroleAttribute as CFString)
         var result: [String: Any] = [
             "role": jsonValue(role),
+            "subrole": jsonValue(subrole),
             "title": jsonValue(axString(element, kAXTitleAttribute as CFString)),
-            "value": safeAccessibilityValue(element, role: role),
+            "value": safeAccessibilityValue(element, role: role, subrole: subrole),
             "description": jsonValue(axString(element, kAXDescriptionAttribute as CFString)),
             "position": jsonValue(axPoint(element, kAXPositionAttribute as CFString).map(pointDictionary)),
             "size": jsonValue(axSize(element, kAXSizeAttribute as CFString).map(sizeDictionary)),
@@ -683,19 +947,39 @@ final class ComputerUseHelper {
         return result
     }
 
-    private func accessibilityTree(maxDepth: Int, maxNodes: Int) throws -> [String: Any] {
+    private func accessibilityTree(
+        maxDepth: Int,
+        maxNodes: Int,
+        expectedProcessID: pid_t?
+    ) throws -> [String: Any] {
         guard let processID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
             throw HelperFailure("NATIVE_OPERATION_FAILED", "No frontmost application is available.")
+        }
+        if let expectedProcessID, processID != expectedProcessID {
+            throw HelperFailure(
+                "TARGET_CHANGED",
+                "The frontmost application changed before Accessibility inspection. Refresh state and retry."
+            )
         }
         let application = AXUIElementCreateApplication(processID)
         var count = 0
         return accessibilityNode(application, depth: 0, maxDepth: maxDepth, maxNodes: maxNodes, count: &count)
     }
 
-    private func focusedElement() throws -> [String: Any]? {
+    private func focusedElement(expectedProcessID: pid_t?) throws -> [String: Any]? {
         let system = AXUIElementCreateSystemWide()
         guard let raw = axValue(system, kAXFocusedUIElementAttribute as CFString) else { return nil }
         let element = raw as! AXUIElement
+        if let expectedProcessID {
+            var actualProcessID = pid_t(0)
+            guard AXUIElementGetPid(element, &actualProcessID) == .success,
+                  actualProcessID == expectedProcessID else {
+                throw HelperFailure(
+                    "TARGET_CHANGED",
+                    "The focused application changed before Accessibility inspection. Refresh state and retry."
+                )
+            }
+        }
         var count = 0
         return accessibilityNode(element, depth: 0, maxDepth: 0, maxNodes: 1, count: &count)
     }

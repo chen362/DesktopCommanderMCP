@@ -47,6 +47,14 @@ export interface Point {
   y: number;
 }
 
+export interface NativeTargetGuard {
+  allowedDisplayIds: number[];
+  expectedProcessId?: number;
+  expectedWindowId?: number;
+  expectedDestinationProcessId?: number;
+  expectedDestinationWindowId?: number;
+}
+
 export interface Rect extends Point {
   width: number;
   height: number;
@@ -88,10 +96,16 @@ export interface WindowInfo extends Rect {
   minimized: boolean;
   onScreen: boolean;
   screenIndex: number | null;
+  displayId: number | null;
+}
+
+export interface AccessibilityTruncation {
+  truncated: true;
 }
 
 export interface AccessibilityNode {
   role: string | null;
+  subrole: string | null;
   title: string | null;
   value: unknown;
   description: string | null;
@@ -99,8 +113,7 @@ export interface AccessibilityNode {
   size: { width: number; height: number } | null;
   enabled: boolean | null;
   focused: boolean | null;
-  children?: AccessibilityNode[];
-  truncated?: boolean;
+  children?: Array<AccessibilityNode | AccessibilityTruncation>;
 }
 
 export interface ComputerUseBackend {
@@ -110,17 +123,17 @@ export interface ComputerUseBackend {
   getWindows(args: { onScreenOnly?: boolean; limit?: number }): Promise<WindowInfo[]>;
   getActiveWindow(): Promise<WindowInfo | null>;
   getMousePosition(): Promise<Point>;
-  moveMouse(point: Point): Promise<void>;
-  click(point: Point, button: MouseButton, clickCount: 1 | 2): Promise<void>;
-  mouseDown(button: MouseButton): Promise<void>;
+  moveMouse(point: Point, guard: NativeTargetGuard): Promise<void>;
+  click(point: Point, button: MouseButton, clickCount: 1 | 2, guard: NativeTargetGuard): Promise<void>;
+  mouseDown(button: MouseButton, guard: NativeTargetGuard): Promise<void>;
   mouseUp(button: MouseButton): Promise<void>;
-  drag(args: { from: Point; to: Point; button: MouseButton; durationMs: number }): Promise<void>;
-  scroll(args: { deltaX: number; deltaY: number }): Promise<void>;
-  typeText(args: { text: string; intervalMs: number }): Promise<void>;
-  pressKey(args: { key: string; modifiers: KeyboardModifier[] }): Promise<void>;
-  hotkey(args: { keys: string[] }): Promise<void>;
-  getAccessibilityTree(args: { maxDepth: number; maxNodes: number }): Promise<AccessibilityNode>;
-  getFocusedElement(): Promise<AccessibilityNode | null>;
+  drag(args: { from: Point; to: Point; button: MouseButton; durationMs: number; guard: NativeTargetGuard }): Promise<void>;
+  scroll(args: { deltaX: number; deltaY: number; guard: NativeTargetGuard }): Promise<void>;
+  typeText(args: { text: string; intervalMs: number; guard: NativeTargetGuard }): Promise<void>;
+  pressKey(args: { key: string; modifiers: KeyboardModifier[]; guard: NativeTargetGuard }): Promise<void>;
+  hotkey(args: { keys: string[]; guard: NativeTargetGuard }): Promise<void>;
+  getAccessibilityTree(args: { maxDepth: number; maxNodes: number; guard: NativeTargetGuard }): Promise<AccessibilityNode>;
+  getFocusedElement(args: { guard: NativeTargetGuard }): Promise<AccessibilityNode | null>;
   shutdown?(): Promise<void>;
 }
 

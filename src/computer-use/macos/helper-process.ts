@@ -24,7 +24,11 @@ interface PendingRequest {
 const NATIVE_ERROR_CODES = new Set<ComputerUseErrorCode>([
   'SCREEN_RECORDING_PERMISSION_REQUIRED',
   'ACCESSIBILITY_PERMISSION_REQUIRED',
+  'POST_EVENT_PERMISSION_REQUIRED',
   'INVALID_COORDINATES',
+  'DISPLAY_NOT_ALLOWED',
+  'APPLICATION_NOT_ALLOWED',
+  'TARGET_CHANGED',
   'NATIVE_OPERATION_FAILED',
 ]);
 
@@ -37,6 +41,19 @@ function asNativeErrorCode(value: string | undefined): ComputerUseErrorCode {
 function nativeSourcePath(): string {
   const currentFile = fileURLToPath(import.meta.url);
   return path.join(path.dirname(currentFile), 'native', 'ComputerUseHelper.swift');
+}
+
+function minimumOperationTimeout(action: string, params: Record<string, unknown>): number {
+  const safetyMarginMs = 5_000;
+  if (action === 'drag' && typeof params.durationMs === 'number' && Number.isFinite(params.durationMs)) {
+    return Math.max(0, params.durationMs) + safetyMarginMs;
+  }
+  if (action === 'typeText' && typeof params.text === 'string'
+    && typeof params.intervalMs === 'number' && Number.isFinite(params.intervalMs)) {
+    const intervals = Math.max(0, Array.from(params.text).length - 1);
+    return intervals * Math.max(0, params.intervalMs) + safetyMarginMs;
+  }
+  return 0;
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -142,6 +159,7 @@ async function resolveHelperBinary(config: ComputerUseConfig): Promise<string> {
 export class MacOSHelperProcess {
   private child: ChildProcessWithoutNullStreams | null = null;
   private startPromise: Promise<void> | null = null;
+  private requestQueue: Promise<void> = Promise.resolve();
   private nextId = 1;
   private stdoutBuffer = '';
   private pending = new Map<string, PendingRequest>();
@@ -235,7 +253,11 @@ export class MacOSHelperProcess {
     this.pending.clear();
   }
 
-  async request<T>(action: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+  private async requestOnce<T>(
+    action: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<T> {
     await this.ensureStarted();
     const child = this.child;
     if (!child || !child.stdin.writable) {
@@ -243,8 +265,9 @@ export class MacOSHelperProcess {
     }
     const config = await this.configProvider();
     const id = `${process.pid}-${this.nextId++}`;
-    const effectiveTimeout = timeoutMs
+    const configuredTimeout = timeoutMs
       ?? (action === 'screenshot' ? config.screenshotTimeoutMs : config.requestTimeoutMs);
+    const effectiveTimeout = Math.max(configuredTimeout, minimumOperationTimeout(action, params));
 
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -264,6 +287,12 @@ export class MacOSHelperProcess {
         reject(new ComputerUseError('HELPER_UNAVAILABLE', `Could not send ${action} to the Computer Use helper: ${error.message}`));
       });
     });
+  }
+
+  request<T>(action: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+    const operation = this.requestQueue.then(() => this.requestOnce<T>(action, params, timeoutMs));
+    this.requestQueue = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   async shutdown(): Promise<void> {

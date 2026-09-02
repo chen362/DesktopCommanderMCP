@@ -24,24 +24,43 @@ const ACCESSIBILITY_TOOLS = new Set<ComputerUseToolName>([
 const DANGEROUS_HOTKEYS = new Set([
   'command+q',
   'command+w',
+  'option+command+w',
+  'shift+command+w',
   'command+delete',
   'command+backspace',
   'control+command+q',
   'shift+command+q',
+  'option+shift+command+q',
   'option+command+escape',
   'shift+command+delete',
+  'option+shift+command+delete',
 ]);
 
 const TERMINAL_APPS = new Set([
   'com.apple.terminal',
   'com.googlecode.iterm2',
+  'com.github.wez.wezterm',
+  'com.mitchellh.ghostty',
+  'co.zeit.hyper',
   'dev.warp.warp-stable',
+  'net.kovidgoyal.kitty',
+  'org.alacritty',
+  'alacritty',
+  'ghostty',
+  'hyper',
+  'kitty',
   'terminal',
   'iterm2',
   'warp',
+  'wezterm',
 ]);
 
-const DANGEROUS_TERMINAL_TEXT = /(?:^|[;&|\s])(?:sudo|shutdown|reboot|halt|poweroff)(?:\s|$)|\brm\s+-[^\n]*r[^\n]*f\b/i;
+const PRIVILEGED_OR_POWER_COMMAND = /(?:^|[;&|\s])(?:sudo|shutdown|reboot|halt|poweroff)(?:\s|$)/i;
+const RECURSIVE_FORCE_RM = /\brm\b(?=[^;&|\n]*\s--?[^\s;&|]*r[^\s;&|]*(?=\s|$|[;&|]))(?=[^;&|\n]*\s--?[^\s;&|]*f[^\s;&|]*(?=\s|$|[;&|]))/i;
+
+function containsDangerousTerminalText(text: string): boolean {
+  return PRIVILEGED_OR_POWER_COMMAND.test(text) || RECURSIVE_FORCE_RM.test(text);
+}
 
 export function assertCapabilityEnabled(toolName: ComputerUseToolName, config: ComputerUseConfig): void {
   if (!config.enabled) {
@@ -108,12 +127,16 @@ function normalizeApp(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
 }
 
-export function assertApplicationAllowed(window: WindowInfo | null, allowedApps: string[]): void {
-  if (allowedApps.length === 0) return;
+export function isApplicationAllowed(window: WindowInfo | null, allowedApps: string[]): boolean {
+  if (allowedApps.length === 0) return true;
   const allowed = new Set(allowedApps.map(normalizeApp));
   const bundle = normalizeApp(window?.bundleIdentifier);
   const name = normalizeApp(window?.applicationName);
-  if (!window || (!allowed.has(bundle) && !allowed.has(name))) {
+  return !!window && (allowed.has(bundle) || allowed.has(name));
+}
+
+export function assertApplicationAllowed(window: WindowInfo | null, allowedApps: string[]): void {
+  if (!isApplicationAllowed(window, allowedApps)) {
     throw new ComputerUseError(
       'APPLICATION_NOT_ALLOWED',
       `The active application ${window?.applicationName || 'could not be identified'} is not allowed by the Computer Use policy.`,
@@ -165,7 +188,7 @@ export function assertTerminalTextAllowed(
   confirmed: boolean,
   config: ComputerUseConfig,
 ): void {
-  if (!config.blockDangerousTerminalText || confirmed || !DANGEROUS_TERMINAL_TEXT.test(text)) return;
+  if (!config.blockDangerousTerminalText || confirmed || !containsDangerousTerminalText(text)) return;
   const appIdentifiers = [activeWindow?.bundleIdentifier, activeWindow?.applicationName].map(normalizeApp);
   if (appIdentifiers.some((value) => TERMINAL_APPS.has(value))) {
     throw new ComputerUseError(

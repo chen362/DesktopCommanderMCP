@@ -44,15 +44,16 @@ try {
   if (!Number.isFinite(mouse.x) || !Number.isFinite(mouse.y)) throw new Error('Invalid mouse coordinates');
 
   if (process.env.COMPUTER_USE_INTEGRATION_MUTATIONS === '1') {
-    if (!permissions.accessibility && !permissions.postEvents) {
-      throw new Error('Mutation checks requested but Accessibility/event-posting permission is not granted');
+    if (!permissions.postEvents) {
+      throw new Error('Mutation checks requested but Post Events permission is not granted');
     }
-    await backend.moveMouse(mouse);
-    await backend.mouseDown('left');
+    const guard = { allowedDisplayIds: [] };
+    await backend.moveMouse(mouse, guard);
+    await backend.mouseDown('left', guard);
     await backend.mouseUp('left');
-    await backend.pressKey({ key: 'escape', modifiers: [] });
+    await backend.pressKey({ key: 'escape', modifiers: [], guard });
     if (process.env.COMPUTER_USE_INTEGRATION_TYPE_TEXT === '1') {
-      await backend.typeText({ text: 'desktop-commander-computer-use-test', intervalMs: 0 });
+      await backend.typeText({ text: 'desktop-commander-computer-use-test', intervalMs: 0, guard });
     } else {
       console.log('SKIP native Unicode typing: set COMPUTER_USE_INTEGRATION_TYPE_TEXT=1 in a disposable focused text field.');
     }

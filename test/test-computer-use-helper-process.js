@@ -35,7 +35,18 @@ try {
   if (restarted.action !== 'health') throw new Error('helper did not recover after timeout');
   if (restarted.pid === first.pid) throw new Error('timed-out helper process was not replaced');
 
-  console.log('Computer Use helper IPC, timeout, and restart test passed.');
+  const extended = await helper.request('drag', { durationMs: 400, delayMs: 350 });
+  if (extended.action !== 'drag') throw new Error('drag duration did not extend the helper timeout budget');
+
+  const queued = await Promise.all([
+    helper.request('queued-first', { delayMs: 180 }),
+    helper.request('queued-second', { delayMs: 180 }),
+  ]);
+  if (queued[0].action !== 'queued-first' || queued[1].action !== 'queued-second') {
+    throw new Error('concurrent helper calls were not serialized in order');
+  }
+
+  console.log('Computer Use helper IPC, serialization, timeout, and restart test passed.');
 } finally {
   await helper.shutdown();
 }

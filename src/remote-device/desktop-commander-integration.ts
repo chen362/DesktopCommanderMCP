@@ -142,7 +142,7 @@ export class DesktopCommanderIntegration {
             const result = await this.mcpClient.callTool({
                 name: toolName,
                 arguments: args,
-                _meta: { remote: true, ...metadata || {} }
+                _meta: { ...(metadata || {}), remote: true }
             } as any);
             console.debug('[DEBUG] Tool call successful:', toolName);
             return result;

@@ -7,6 +7,7 @@ import {
   assertDisplayAllowed,
   assertHotkeyConfirmed,
   assertTerminalTextAllowed,
+  isApplicationAllowed,
   normalizeHotkey,
   normalizeHotkeyKeys,
   validatePoint,
@@ -17,6 +18,7 @@ import type {
   ComputerUseToolName,
   DisplayInfo,
   KeyboardModifier,
+  NativeTargetGuard,
   Point,
   WindowInfo,
 } from './types.js';
@@ -46,10 +48,10 @@ export class ComputerUseService {
 
   private async requireInputPermission(): Promise<void> {
     const permissions = await this.backend.checkPermissions(false);
-    if (!permissions.accessibility && !permissions.postEvents) {
+    if (!permissions.postEvents) {
       throw new ComputerUseError(
-        'ACCESSIBILITY_PERMISSION_REQUIRED',
-        'Accessibility permission is required. Open System Settings -> Privacy & Security -> Accessibility, enable the Desktop Commander Computer Use helper, then restart the Remote Device process.',
+        'POST_EVENT_PERMISSION_REQUIRED',
+        'Post Events permission is required for mouse and keyboard input. Open System Settings -> Privacy & Security -> Accessibility, enable the Desktop Commander Computer Use helper, then restart the client process that runs Desktop Commander.',
       );
     }
   }
@@ -59,7 +61,7 @@ export class ComputerUseService {
     if (!permissions.screenRecording) {
       throw new ComputerUseError(
         'SCREEN_RECORDING_PERMISSION_REQUIRED',
-        'Screen Recording permission is required. Open System Settings -> Privacy & Security -> Screen & System Audio Recording, enable the Desktop Commander Computer Use helper, then restart the Remote Device process.',
+        'Screen Recording permission is required. Open System Settings -> Privacy & Security -> Screen & System Audio Recording, enable the Desktop Commander Computer Use helper, then restart the client process that runs Desktop Commander.',
       );
     }
   }
@@ -70,23 +72,64 @@ export class ComputerUseService {
     return displays;
   }
 
-  private async assertActiveApplicationAllowed(config: ComputerUseConfig): Promise<WindowInfo | null> {
+  private windowUsesAllowedDisplay(
+    window: WindowInfo | null,
+    displays: DisplayInfo[],
+    allowedDisplays: number[],
+  ): boolean {
+    if (allowedDisplays.length === 0) return true;
+    if (!window) return false;
+    if (typeof window.displayId === 'number') return allowedDisplays.includes(window.displayId);
+    if (window.screenIndex === null) return false;
+    const display = displays.find((candidate) => candidate.index === window.screenIndex);
+    return !!display && allowedDisplays.includes(display.displayId);
+  }
+
+  private async assertActiveTargetAllowed(config: ComputerUseConfig): Promise<WindowInfo | null> {
     const activeWindow = await this.backend.getActiveWindow();
     assertApplicationAllowed(activeWindow, config.allowedApps);
+    if (config.allowedDisplays.length > 0) {
+      const displays = await this.backend.getScreenInfo();
+      if (!this.windowUsesAllowedDisplay(activeWindow, displays, config.allowedDisplays)) {
+        throw new ComputerUseError(
+          'DISPLAY_NOT_ALLOWED',
+          'The active window is not on a display allowed by the Computer Use policy.',
+        );
+      }
+    }
     return activeWindow;
   }
 
-  private async assertPointApplicationAllowed(point: Point, config: ComputerUseConfig): Promise<void> {
-    if (config.allowedApps.length === 0) return;
+  private async pointTarget(point: Point, config: ComputerUseConfig): Promise<WindowInfo | null> {
     const windows = await this.backend.getWindows({ onScreenOnly: true, limit: 200 });
     const target = windows.find((window) => pointInsideWindow(point, window)) ?? null;
     assertApplicationAllowed(target, config.allowedApps);
+    return target;
+  }
+
+  private targetGuard(
+    config: ComputerUseConfig,
+    expected: Omit<NativeTargetGuard, 'allowedDisplayIds'> = {},
+  ): NativeTargetGuard {
+    return {
+      allowedDisplayIds: config.allowedDisplays,
+      ...expected,
+    };
   }
 
   private filterDisplays(displays: DisplayInfo[], config: ComputerUseConfig): DisplayInfo[] {
     return config.allowedDisplays.length === 0
       ? displays
       : displays.filter((display) => config.allowedDisplays.includes(display.displayId));
+  }
+
+  private filterWindows(
+    windows: WindowInfo[],
+    displays: DisplayInfo[],
+    config: ComputerUseConfig,
+  ): WindowInfo[] {
+    return windows.filter((window) => isApplicationAllowed(window, config.allowedApps)
+      && this.windowUsesAllowedDisplay(window, displays, config.allowedDisplays));
   }
 
   async execute(toolName: ComputerUseToolName, args: Record<string, any>): Promise<ServerResult> {
@@ -104,9 +147,25 @@ export class ComputerUseService {
       }
       case 'computer_screenshot': {
         await this.requireScreenPermission();
-        if (args.displayId !== undefined) assertDisplayAllowed(args.displayId, config.allowedDisplays);
+        let displayId = args.displayId as number | undefined;
+        if (config.allowedDisplays.length > 0) {
+          const displays = await this.backend.getScreenInfo();
+          if (displayId === undefined) {
+            const allowed = displays.filter((display) => config.allowedDisplays.includes(display.displayId));
+            const selected = allowed.find((display) => display.primary) ?? allowed[0];
+            if (!selected) {
+              throw new ComputerUseError(
+                'DISPLAY_NOT_ALLOWED',
+                'None of the displays allowed by the Computer Use policy are currently connected.',
+              );
+            }
+            displayId = selected.displayId;
+          } else {
+            assertDisplayAllowed(displayId, config.allowedDisplays);
+          }
+        }
         const screenshot = await this.backend.screenshot({
-          displayId: args.displayId,
+          displayId,
           includeCursor: args.includeCursor,
         });
         assertDisplayAllowed(screenshot.display.displayId, config.allowedDisplays);
@@ -128,28 +187,34 @@ export class ComputerUseService {
         };
       }
       case 'computer_get_windows': {
-        const windows = await this.backend.getWindows({ onScreenOnly: args.onScreenOnly, limit: args.limit });
-        if (config.allowedDisplays.length === 0) return jsonResult('Windows', windows, { windows });
-        const displays = await this.backend.getScreenInfo();
-        const allowedIndexes = new Set(displays
-          .filter((display) => config.allowedDisplays.includes(display.displayId))
-          .map((display) => display.index));
-        const filtered = windows.filter((window) => window.screenIndex === null || allowedIndexes.has(window.screenIndex));
+        const policyFiltersWindows = config.allowedApps.length > 0 || config.allowedDisplays.length > 0;
+        const windows = await this.backend.getWindows({
+          onScreenOnly: args.onScreenOnly,
+          limit: policyFiltersWindows ? 500 : args.limit,
+        });
+        const displays = config.allowedDisplays.length > 0 ? await this.backend.getScreenInfo() : [];
+        const filtered = this.filterWindows(windows, displays, config).slice(0, args.limit);
         return jsonResult('Windows', filtered, { windows: filtered });
       }
       case 'computer_get_active_window': {
         const window = await this.backend.getActiveWindow();
-        return jsonResult('Active window', window, { activeWindow: window });
+        const displays = config.allowedDisplays.length > 0 ? await this.backend.getScreenInfo() : [];
+        const filtered = isApplicationAllowed(window, config.allowedApps)
+          && this.windowUsesAllowedDisplay(window, displays, config.allowedDisplays)
+          ? window
+          : null;
+        return jsonResult('Active window', filtered, { activeWindow: filtered });
       }
       case 'computer_get_mouse_position': {
         const position = await this.backend.getMousePosition();
+        if (config.allowedDisplays.length > 0) await this.validateCoordinates([position], config);
         return jsonResult('Mouse position', position, { mousePosition: position });
       }
       case 'computer_move_mouse': {
         await this.requireInputPermission();
         const point = { x: args.x, y: args.y };
         await this.validateCoordinates([point], config);
-        await this.backend.moveMouse(point);
+        await this.backend.moveMouse(point, this.targetGuard(config));
         return jsonResult('Mouse moved', point);
       }
       case 'computer_click':
@@ -158,69 +223,128 @@ export class ComputerUseService {
         await this.requireInputPermission();
         const point = { x: args.x, y: args.y };
         await this.validateCoordinates([point], config);
-        await this.assertPointApplicationAllowed(point, config);
+        const target = await this.pointTarget(point, config);
         const button = toolName === 'computer_right_click' ? 'right' : 'left';
         const clickCount = toolName === 'computer_double_click' ? 2 : 1;
-        await this.backend.click(point, button, clickCount);
+        await this.backend.click(point, button, clickCount, this.targetGuard(config, {
+          expectedProcessId: target?.processId,
+          expectedWindowId: target?.windowId ?? undefined,
+        }));
         return jsonResult('Mouse click completed', { ...point, button, clickCount });
       }
-      case 'computer_mouse_down':
-      case 'computer_mouse_up': {
+      case 'computer_mouse_down': {
         await this.requireInputPermission();
         const position = await this.backend.getMousePosition();
         await this.validateCoordinates([position], config);
-        await this.assertPointApplicationAllowed(position, config);
-        if (toolName === 'computer_mouse_down') await this.backend.mouseDown(args.button);
-        else await this.backend.mouseUp(args.button);
-        return jsonResult(toolName === 'computer_mouse_down' ? 'Mouse button pressed' : 'Mouse button released', {
+        const target = await this.pointTarget(position, config);
+        await this.backend.mouseDown(args.button, this.targetGuard(config, {
+          expectedProcessId: target?.processId,
+          expectedWindowId: target?.windowId ?? undefined,
+        }));
+        return jsonResult('Mouse button pressed', {
           button: args.button,
           position,
         });
+      }
+      case 'computer_mouse_up': {
+        await this.requireInputPermission();
+        const position = await this.backend.getMousePosition();
+        await this.backend.mouseUp(args.button);
+        return jsonResult('Mouse button released', { button: args.button, position });
       }
       case 'computer_drag': {
         await this.requireInputPermission();
         const from = { x: args.fromX, y: args.fromY };
         const to = { x: args.toX, y: args.toY };
         await this.validateCoordinates([from, to], config);
-        await this.assertPointApplicationAllowed(from, config);
-        await this.assertPointApplicationAllowed(to, config);
-        await this.backend.drag({ from, to, button: args.button, durationMs: args.durationMs });
+        const fromTarget = await this.pointTarget(from, config);
+        const toTarget = await this.pointTarget(to, config);
+        await this.backend.drag({
+          from,
+          to,
+          button: args.button,
+          durationMs: args.durationMs,
+          guard: this.targetGuard(config, {
+            expectedProcessId: fromTarget?.processId,
+            expectedWindowId: fromTarget?.windowId ?? undefined,
+            expectedDestinationProcessId: toTarget?.processId,
+            expectedDestinationWindowId: toTarget?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Drag completed', { from, to, button: args.button, durationMs: args.durationMs });
       }
       case 'computer_scroll': {
         await this.requireInputPermission();
-        await this.assertActiveApplicationAllowed(config);
-        await this.backend.scroll({ deltaX: args.deltaX, deltaY: args.deltaY });
+        const activeWindow = await this.assertActiveTargetAllowed(config);
+        await this.backend.scroll({
+          deltaX: args.deltaX,
+          deltaY: args.deltaY,
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Scroll completed', { deltaX: args.deltaX, deltaY: args.deltaY });
       }
       case 'computer_type': {
         await this.requireInputPermission();
-        const activeWindow = await this.assertActiveApplicationAllowed(config);
+        const activeWindow = await this.assertActiveTargetAllowed(config);
         assertTerminalTextAllowed(args.text, activeWindow, args.confirmed, config);
-        await this.backend.typeText({ text: args.text, intervalMs: args.intervalMs });
+        await this.backend.typeText({
+          text: args.text,
+          intervalMs: args.intervalMs,
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Text typed', { characterCount: Array.from(args.text).length });
       }
       case 'computer_key': {
         await this.requireInputPermission();
-        await this.assertActiveApplicationAllowed(config);
+        const activeWindow = await this.assertActiveTargetAllowed(config);
         const modifiers = args.modifiers as KeyboardModifier[];
         const normalized = normalizeHotkey(args.key, modifiers);
         assertHotkeyConfirmed(normalized, args.confirmed, config);
-        await this.backend.pressKey({ key: args.key, modifiers });
+        await this.backend.pressKey({
+          key: args.key,
+          modifiers,
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Key pressed', { key: args.key, modifiers });
       }
       case 'computer_hotkey': {
         await this.requireInputPermission();
-        await this.assertActiveApplicationAllowed(config);
-        const normalized = normalizeHotkeyKeys(args.keys);
+        const activeWindow = await this.assertActiveTargetAllowed(config);
+        const keys = (args.keys as string[]).map((key) => key.trim()).map((key) =>
+          ['command', 'control', 'option', 'shift', 'fn'].includes(key.toLowerCase()) ? key.toLowerCase() : key);
+        const normalized = normalizeHotkeyKeys(keys);
         assertHotkeyConfirmed(normalized, args.confirmed, config);
-        await this.backend.hotkey({ keys: args.keys });
-        return jsonResult('Hotkey pressed', { keys: args.keys });
+        await this.backend.hotkey({
+          keys,
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
+        return jsonResult('Hotkey pressed', { keys });
       }
       case 'computer_get_state': {
-        const displays = this.filterDisplays(await this.backend.getScreenInfo(), config);
-        const mousePosition = await this.backend.getMousePosition();
-        const activeWindow = await this.backend.getActiveWindow();
+        const allDisplays = await this.backend.getScreenInfo();
+        const displays = this.filterDisplays(allDisplays, config);
+        const rawMousePosition = await this.backend.getMousePosition();
+        const mousePosition = config.allowedDisplays.length === 0
+          || displays.some((display) => pointInsideWindow(rawMousePosition, display))
+          ? rawMousePosition
+          : null;
+        const rawActiveWindow = await this.backend.getActiveWindow();
+        const activeWindow = isApplicationAllowed(rawActiveWindow, config.allowedApps)
+          && this.windowUsesAllowedDisplay(rawActiveWindow, allDisplays, config.allowedDisplays)
+          ? rawActiveWindow
+          : null;
         const state = {
           timestamp: new Date().toISOString(),
           lastScreenshotTimestamp: this.lastScreenshotTimestamp,
@@ -239,7 +363,15 @@ export class ComputerUseService {
             'Accessibility permission is required to inspect UI elements. Open System Settings -> Privacy & Security -> Accessibility and enable the Desktop Commander Computer Use helper.',
           );
         }
-        const tree = await this.backend.getAccessibilityTree({ maxDepth: args.maxDepth, maxNodes: args.maxNodes });
+        const activeWindow = await this.assertActiveTargetAllowed(config);
+        const tree = await this.backend.getAccessibilityTree({
+          maxDepth: args.maxDepth,
+          maxNodes: args.maxNodes,
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Accessibility tree', tree, { accessibilityTree: tree });
       }
       case 'computer_get_focused_element': {
@@ -250,7 +382,13 @@ export class ComputerUseService {
             'Accessibility permission is required to inspect the focused UI element. Open System Settings -> Privacy & Security -> Accessibility and enable the Desktop Commander Computer Use helper.',
           );
         }
-        const element = await this.backend.getFocusedElement();
+        const activeWindow = await this.assertActiveTargetAllowed(config);
+        const element = await this.backend.getFocusedElement({
+          guard: this.targetGuard(config, {
+            expectedProcessId: activeWindow?.processId,
+            expectedWindowId: activeWindow?.windowId ?? undefined,
+          }),
+        });
         return jsonResult('Focused accessibility element', element, { focusedElement: element });
       }
     }
